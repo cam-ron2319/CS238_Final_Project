@@ -89,10 +89,10 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Train the model
-    train_lstm_model(X_tensor, y_tensor, model, criterion, optimizer, epochs=10)
+    # train_lstm_model(X_tensor, y_tensor, model, criterion, optimizer, epochs=1)
 
     # Example model use
-    predicted_pitch_probs, predicted_duration_probs = predict_sequence(X_tensor[0:2])  # Example
+    predicted_pitch_probs, predicted_duration_probs = predict_sequence(X_tensor[0:1, 0:3, :])  # Example
     print("Predicted pitch probabilities:", predicted_pitch_probs)
     print("Predicted duration probabilities:", predicted_duration_probs)
 

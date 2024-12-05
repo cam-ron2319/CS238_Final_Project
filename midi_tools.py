@@ -21,6 +21,10 @@ tick_map = {
 }
 
 
+# Invert tick_map for duration mapping
+inverse_tick_map = {v: k for k, v in tick_map.items()}
+
+
 class Midi:
     def __init__(self):
         note_map = {0: 'A', 1: 'Bb', 2: 'B', 3: 'C',
@@ -118,3 +122,44 @@ class MidiProcessor(Midi):
         events = preprocess_top_stave(filepath)
         X, y = events_to_lstm_input(events, seq_len=self.seq_len)
         return X, y
+
+
+def one_hot_to_midi(one_hot_embeddings, output_file):
+    midi = MidiFile()
+    track = mido.MidiTrack()
+    midi.tracks.append(track)
+
+    # Add meta messages for clef and key signature
+    track.append(mido.MetaMessage('key_signature', key='C'))
+    track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4))  # Default 4/4 time signature
+
+    velocity = 64  # Default velocity for all notes
+    tick_inverse = {v: k for k, v in tick_map.items()}  # Inverse map for tick values
+
+    for embedding in one_hot_embeddings:
+        # Extract pitch and duration
+        pitch_idx = np.argmax(embedding[:89])
+        duration_idx = np.argmax(embedding[89:])
+
+        # Determine note/rest and duration in ticks
+        if pitch_idx == 0:  # Rest
+            tick_duration = tick_inverse.get(duration_idx, 480)  # Default to quarter note if not mapped
+            track.append(mido.Message('note_off', velocity=0, time=tick_duration))
+            continue
+
+        midi_note = pitch_idx + 20  # Convert to MIDI note number
+        tick_duration = tick_inverse.get(duration_idx, 480)
+
+        # Add messages for note_on and note_off
+        track.append(mido.Message('note_on', note=midi_note, velocity=velocity, time=0))
+        track.append(mido.Message('note_off', note=midi_note, velocity=velocity, time=tick_duration))
+
+    # Save the MIDI file
+    midi.save(output_file)
+    print(f"MIDI file saved as {output_file}")
+
+
+if __name__ == "__main__":
+    one_hot_list = [np.eye(104)[np.random.choice(104)] for _ in range(32)]
+    one_hot_to_midi(one_hot_list, "output.mid")
+
