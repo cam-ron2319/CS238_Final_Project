@@ -1,0 +1,217 @@
+import numpy as np
+import torch
+import random
+import torch.nn as nn
+from bach import LSTMModel, train_lstm_model, predict_sequence
+from midi_tools import MidiProcessor
+
+
+class BachMelodyQLearning:
+    def __init__(self, num_notes=89, num_durations=15):
+        """
+        Simple Q-learning for melody generation
+
+        Args:
+        - num_notes: Total number of possible notes (including pauses)
+        - num_durations: Total number of possible note durations
+        """
+        self.num_notes = num_notes
+        self.num_durations = num_durations
+
+        # State, action pair -> (cur_note, cur_dur), (next_note, next_dur)
+        # Q-table: (current_note, current_duration, next_note, next_duration)
+        self.q_table = np.zeros((num_notes, num_durations, num_notes, num_durations))
+
+        # Learning parameters
+        self.learning_rate = 0.1
+        self.discount_factor = 0.95
+        self.exploration_rate = 1.0
+        self.min_exploration_rate = 0.01
+        self.exploration_decay = 0.995
+        self.hidden_size = 128
+        self.output_size = num_notes + num_durations  # Output will be note + duration
+        self.input_size = num_notes + num_durations  # Input size is also note + duration
+
+        self.LSTM_model = None
+
+    def melody_to_one_hot(self, melody_sequence, num_notes=89, num_durations=15):
+        """
+        Converts a melody sequence to a one-hot tensor for LSTM input.
+
+        Args:
+            melody_sequence: List of (note, duration) tuples or tensor
+            num_notes: Number of unique notes
+            num_durations: Number of unique durations
+
+        Returns:
+            One-hot encoded tensor for LSTM input
+        """
+        # Ensure melody_sequence is in a consistent format
+        if torch.is_tensor(melody_sequence):
+            melody_sequence = melody_sequence.numpy().tolist()
+
+        # Prepare one-hot encodings
+        one_hot_pause = np.zeros(num_notes + num_durations)
+        one_hot_pause[0] = 1  # Pause is the first entry
+
+        one_hot_notes = [np.zeros(num_notes) for _ in range(num_notes)]
+        for i in range(num_notes - 1):
+            one_hot_notes[i][i + 1] = 1  # Note indices start at 1
+
+        # Initialize one-hot encodings for durations
+        one_hot_durations = [np.zeros(num_durations) for _ in range(num_durations)]
+        for i in range(num_durations - 1):
+            one_hot_durations[i][i + 1] = 1  # Duration indices start at 1
+
+        # Convert melody sequence to one-hot
+        sequence = []
+        for elem in melody_sequence:
+            # Handle different input formats
+            if isinstance(elem, (list, tuple, np.ndarray)):
+                # Unpack note and duration, handling potential nested structures
+                note = elem[0] if isinstance(elem[0], (int, float, np.integer)) else elem[0][0]
+                duration = elem[1] if isinstance(elem[1], (int, float, np.integer)) else elem[1][0]
+            else:
+                # If the input is not in expected format, use a default pause
+                note, duration = 0, 0
+
+            # Robust type conversion and bounds checking
+            note = int(min(max(note, 0), num_notes - 1))
+            duration = int(min(max(duration, 0), num_durations - 1))
+
+            # Handle pause or invalid input
+            if note == 0 and duration == 0:
+                sequence.append(one_hot_pause)
+            else:
+                # Combine note and duration one-hot encodings
+                note_duration = np.concatenate([one_hot_notes[note], one_hot_durations[duration]])
+                sequence.append(note_duration)
+
+        # Convert to tensor and add batch dimension
+        return torch.tensor(sequence, dtype=torch.float32).unsqueeze(0)
+
+    def set_up_LSTM_model(self, model):
+        self.LSTM_model = model
+
+    def get_rewards(self, sequence):
+        one_hot_sequence = self.melody_to_one_hot(sequence)
+        pred_pitch_probs, pred_duration_probs = predict_sequence(one_hot_sequence)
+        reward = np.mean(pred_pitch_probs) * np.mean(pred_duration_probs)
+        return reward
+
+
+    def select_action(self, cur_state, available_actions):
+        """
+        epsilon greedy action selection
+        :param cur_state: (note, duration) pair
+        :param available_actions: list of (next_note, next_duration) pairs
+        :return:
+        """
+        # Epsilon-greedy approach
+        if random.random() < self.exploration_rate:
+            return random.choice(available_actions)
+        else:
+            best_action = None
+            max_q_val = float("-inf")
+            for next_note, next_duration in available_actions:
+                next_note = min(max(next_note, 0), self.num_notes - 1)
+                next_duration = min(max(next_duration, 0), self.num_durations - 1)
+                q_val = self.q_table[cur_state[0], cur_state[1], next_note, next_duration]
+                if q_val > max_q_val:
+                    max_q_val = q_val
+                    best_action = (next_note, next_duration)
+            return best_action
+
+    def Q_learning_update(self, cur_state, action, reward):
+        next_note, next_duration = action
+
+        q_val = self.q_table[cur_state[0], cur_state[1], next_note, next_duration]
+        max_next_q_val = np.max(self.q_table[cur_state[0], cur_state[1], :, :])
+        q_val += self.learning_rate * (reward + self.discount_factor * max_next_q_val - q_val)
+
+        self.q_table[cur_state[0], cur_state[1], next_note, next_duration] = q_val
+
+    def train(self, epochs=100, sequence_len=32):
+        for epoch in range(epochs):
+            # initialize a random start point
+            current_state = (random.randint(0, self.num_notes - 1), random.randint(0, self.num_durations - 1))
+            melody_sequence = [current_state]
+
+            for _ in range(sequence_len - 1):
+                possible_actions = [(next_note, next_duration)
+                                    for next_note in range(self.num_notes)
+                                    for next_duration in range(self.num_durations)]
+                action = self.select_action(current_state, possible_actions)
+                melody_sequence.append(action)
+
+                reward = self.get_rewards(torch.tensor(melody_sequence, dtype=torch.float32).unsqueeze(0))
+                self.Q_learning_update(current_state, action, reward)
+                current_state = action
+        return self.q_table
+
+    def generate_melody(self, sequence_length=32, initial_state=None):
+        """
+        Generate a melody using learned Q-values
+
+        Args:
+        - sequence_length: Number of notes in the melody
+        - initial_state: Optional starting state
+
+        Returns:
+        - Generated melody sequence
+        """
+        if initial_state is None:
+            # Random initial state
+            initial_note = np.random.randint(0, self.num_notes)
+            initial_duration = np.random.randint(0, self.num_durations)
+            initial_state = (initial_note, initial_duration)
+
+        melody_sequence = []
+        current_state = initial_state
+
+        for _ in range(sequence_length):
+            # Generate available actions (all possible next notes and durations)
+            available_actions = [
+                (next_note, next_duration)
+                for next_note in range(self.num_notes)
+                for next_duration in range(self.num_durations)
+            ]
+
+            # Choose action
+            action = self.select_action(current_state, available_actions)
+            melody_sequence.append(action)
+
+            # Update current state
+            current_state = action
+        return melody_sequence
+
+
+def main():
+    # Load pre-trained LSTM model (assuming you have the previous code)
+    midi_processor = MidiProcessor()
+    X, y = midi_processor.process_for_lstm("/Users/ianlasic/Downloads/988-v01.mid")
+
+    # Convert data to tensors
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    y_tensor = torch.tensor(y, dtype=torch.float32)
+
+    # Initialize and train LSTM model
+    model = LSTMModel(input_size=104, hidden_size=128, output_size=104)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    train_lstm_model(X_tensor, y_tensor, model, criterion, optimizer, epochs=10)
+
+    # Initialize Q-learning agent
+    q_learning_agent = BachMelodyQLearning()
+    q_learning_agent.set_up_LSTM_model(model)
+
+    # Train Q-learning agent
+    q_table = q_learning_agent.train()
+
+    # Generate melody
+    generated_melody = q_learning_agent.generate_melody()
+    print("Generated Melody:", generated_melody)
+    
+
+if __name__ == '__main__':
+    main()
